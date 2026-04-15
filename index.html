@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Finite Automata Simulator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet"/>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body,#root{width:100%;height:100%;overflow:hidden;background:#030a18}
+  ::-webkit-scrollbar{width:4px;height:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#1e3a5f;border-radius:2px}
+  @keyframes pop{0%{opacity:0;transform:scale(.93) translateY(6px)}100%{opacity:1;transform:none}}
+  @keyframes glow{0%,100%{opacity:.7}50%{opacity:1}}
+  button:focus{outline:none}
+  select option{background:#09142a}
+  input[type=range]{height:4px;cursor:pointer}
+  .tape-cell{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:5px;font-size:13px;font-weight:700;border:1px solid;transition:all .25s;position:relative}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const {useState,useRef,useEffect,useMemo,useCallback,Fragment}=React;
+
+// ─── THEME ─────────────────────────────────────────────
+const C={
+  bg:"#030a18",canvas:"#050e1f",surface:"#09142a",surface2:"#0c1a33",
+  border:"#102240",text:"#c5daff",dim:"#2e4a6a",mid:"#4a6888",
+  accent:"#00b8ff",success:"#00e084",danger:"#ff2952",warn:"#ffaa00",
+  stateBase:"#081728",
+};
+const FF="'JetBrains Mono','Fira Code',monospace";
+const SR=26; // state radius
+
+// ─── UID ───────────────────────────────────────────────
+let _id=1000;
+const uid=()=>`n${_id++}`;
+
+// ─── EPSILON CLOSURE ───────────────────────────────────
+function epsClosure(ids,tr){
+  const s=new Set(ids),q=[...ids];
+  while(q.length){
+    const c=q.pop();
+    tr.filter(t=>t.from===c&&t.syms.includes("ε"))
+      .forEach(t=>{if(!s.has(t.to)){s.add(t.to);q.push(t.to);}});
+  }
+  return [...s];
+}
+
+// ─── SIMULATE ──────────────────────────────────────────
+function runSim(states,tr,mode,input){
+  const start=states.find(s=>s.isStart);
+  if(!start)return null;
+  const lbl=id=>states.find(s=>s.id===id)?.lbl??id;
+  const frames=[];
+  let cur=mode==="nfa"?epsClosure([start.id],tr):[start.id];
+  frames.push({states:cur,trans:[],idx:-1,
+    desc:`Start → {${cur.map(lbl).join(", ")}}`});
+  for(let i=0;i<input.length;i++){
+    const sym=input[i];
+    let next=[],used=[];
+    if(mode==="nfa"){
+      const reach=new Set();
+      cur.forEach(sid=>tr.filter(t=>t.from===sid&&t.syms.includes(sym))
+        .forEach(t=>{reach.add(t.to);used.push(t.id);}));
+      next=epsClosure([...reach],tr);
+    }else{
+      const t=tr.find(t=>t.from===cur[0]&&t.syms.includes(sym));
+      if(t){next=[t.to];used=[t.id];}
+    }
+    frames.push({states:next,trans:[...new Set(used)],idx:i,sym,
+      desc:next.length===0?`'${sym}' → ∅ (dead)`
+        :`'${sym}' → {${next.map(lbl).join(", ")}}`});
+    cur=next;
+    if(!cur.length)break;
+  }
+  const accepted=frames.at(-1).states.some(id=>states.find(s=>s.id===id)?.isAccept);
+  return{frames,accepted};
+}
+
+// ─── PATH MATH ─────────────────────────────────────────
+function calcPath(f,to,allTr){
+  if(!f||!to)return null;
+  if(f.id===to.id){
+    const{x,y}=f;
+    return{d:`M ${x-12} ${y-SR} C ${x-50} ${y-SR-65} ${x+50} ${y-SR-65} ${x+12} ${y-SR}`,
+      lx:x,ly:y-SR-52,self:true};
+  }
+  const rev=allTr.some(t=>t.from===to.id&&t.to===f.id&&t.id!=="__");
+  const dx=to.x-f.x,dy=to.y-f.y,d=Math.hypot(dx,dy)||1;
+  const nx=-dy/d,ny=dx/d,off=rev?50:0;
+  const cpx=(f.x+to.x)/2+nx*off,cpy=(f.y+to.y)/2+ny*off;
+  const a1=Math.atan2(cpy-f.y,cpx-f.x);
+  const sx=f.x+Math.cos(a1)*SR,sy=f.y+Math.sin(a1)*SR;
+  const a2=Math.atan2(cpy-to.y,cpx-to.x);
+  const ex=to.x+Math.cos(a2)*SR,ey=to.y+Math.sin(a2)*SR;
+  return{d:`M ${sx} ${sy} Q ${cpx} ${cpy} ${ex} ${ey}`,
+    lx:.25*sx+.5*cpx+.25*ex+nx*16,
+    ly:.25*sy+.5*cpy+.25*ey+ny*16};
+}
+
+// ─── EXAMPLES ──────────────────────────────────────────
+const EXAMPLES={
+  'DFA – ends with "ab"':{mode:"dfa",
+    states:[{id:"q0",x:130,y:210,lbl:"q0",isStart:true,isAccept:false},
+            {id:"q1",x:340,y:210,lbl:"q1",isStart:false,isAccept:false},
+            {id:"q2",x:550,y:210,lbl:"q2",isStart:false,isAccept:true}],
+    trans:[{id:"e1",from:"q0",to:"q0",syms:["b"]},{id:"e2",from:"q0",to:"q1",syms:["a"]},
+           {id:"e3",from:"q1",to:"q1",syms:["a"]},{id:"e4",from:"q1",to:"q2",syms:["b"]},
+           {id:"e5",from:"q2",to:"q1",syms:["a"]},{id:"e6",from:"q2",to:"q0",syms:["b"]}]},
+  "DFA – even 0s":{mode:"dfa",
+    states:[{id:"q0",x:180,y:210,lbl:"q0",isStart:true,isAccept:true},
+            {id:"q1",x:460,y:210,lbl:"q1",isStart:false,isAccept:false}],
+    trans:[{id:"e1",from:"q0",to:"q1",syms:["0"]},{id:"e2",from:"q1",to:"q0",syms:["0"]},
+           {id:"e3",from:"q0",to:"q0",syms:["1"]},{id:"e4",from:"q1",to:"q1",syms:["1"]}]},
+  'NFA – contains "aa"':{mode:"nfa",
+    states:[{id:"q0",x:130,y:210,lbl:"q0",isStart:true,isAccept:false},
+            {id:"q1",x:340,y:210,lbl:"q1",isStart:false,isAccept:false},
+            {id:"q2",x:550,y:210,lbl:"q2",isStart:false,isAccept:true}],
+    trans:[{id:"e1",from:"q0",to:"q0",syms:["a","b"]},{id:"e2",from:"q0",to:"q1",syms:["a"]},
+           {id:"e3",from:"q1",to:"q2",syms:["a"]},{id:"e4",from:"q2",to:"q2",syms:["a","b"]}]},
+  "NFA – ε-transitions":{mode:"nfa",
+    states:[{id:"q0",x:120,y:230,lbl:"q0",isStart:true,isAccept:false},
+            {id:"q1",x:330,y:120,lbl:"q1",isStart:false,isAccept:false},
+            {id:"q2",x:330,y:340,lbl:"q2",isStart:false,isAccept:false},
+            {id:"q3",x:540,y:230,lbl:"q3",isStart:false,isAccept:true}],
+    trans:[{id:"e1",from:"q0",to:"q1",syms:["ε"]},{id:"e2",from:"q0",to:"q2",syms:["ε"]},
+           {id:"e3",from:"q1",to:"q3",syms:["a"]},{id:"e4",from:"q2",to:"q3",syms:["b"]},
+           {id:"e5",from:"q3",to:"q0",syms:["ε"]}]},
+  "DFA – div by 3 (binary)":{mode:"dfa",
+    states:[{id:"q0",x:180,y:210,lbl:"r=0",isStart:true,isAccept:true},
+            {id:"q1",x:400,y:110,lbl:"r=1",isStart:false,isAccept:false},
+            {id:"q2",x:400,y:310,lbl:"r=2",isStart:false,isAccept:false}],
+    trans:[{id:"e1",from:"q0",to:"q0",syms:["0"]},{id:"e2",from:"q0",to:"q1",syms:["1"]},
+           {id:"e3",from:"q1",to:"q2",syms:["0"]},{id:"e4",from:"q1",to:"q0",syms:["1"]},
+           {id:"e5",from:"q2",to:"q1",syms:["0"]},{id:"e6",from:"q2",to:"q2",syms:["1"]}]},
+};
+
+// ─── SMALL UI ──────────────────────────────────────────
+function Btn({children,active,disabled,onClick,danger,style:st={}}){
+  const[h,sH]=useState(false);
+  return <button onClick={onClick} disabled={disabled}
+    onMouseEnter={()=>sH(true)} onMouseLeave={()=>sH(false)}
+    style={{padding:"3px 9px",border:`1px solid ${active?C.accent:h?C.mid:C.border}`,
+      borderRadius:"5px",cursor:disabled?"default":"pointer",
+      background:active?`${C.accent}22`:h&&!disabled?`${C.accent}0d`:"transparent",
+      color:disabled?C.dim:active?C.accent:danger?C.danger:C.text,
+      fontFamily:FF,fontSize:"10px",transition:"all .12s",
+      opacity:disabled?.4:1,flexShrink:0,...st}}>{children}</button>;
+}
+
+function PLabel({children}){
+  return <div style={{fontSize:"8px",color:C.dim,letterSpacing:"1.8px",
+    marginBottom:"6px",fontWeight:"700"}}>{children}</div>;
+}
+
+function MRow({children,onClick,danger}){
+  const[h,sH]=useState(false);
+  return <div onClick={onClick}
+    onMouseEnter={()=>sH(true)} onMouseLeave={()=>sH(false)}
+    style={{padding:"7px 13px",cursor:"pointer",fontSize:"11px",
+      color:danger?C.danger:C.text,
+      background:h?(danger?`${C.danger}18`:`${C.accent}14`):"transparent",
+      transition:"background .1s"}}>{children}</div>;
+}
+
+// ─── MAIN ──────────────────────────────────────────────
+function App(){
+  const[states,setStates]=useState([]);
+  const[trans,setTrans]=useState([]);
+  const[mode,setMode]=useState("dfa");
+  const[tool,setTool]=useState("select");
+  const[sel,setSel]=useState(null);
+  const[ctxMenu,setCtxMenu]=useState(null);
+  const[connFrom,setConnFrom]=useState(null);
+  const[drag,setDrag]=useState(null);
+  const[mouse,setMouse]=useState({x:0,y:0});
+  const[showTable,setShowTable]=useState(false);
+  const[activeTab,setActiveTab]=useState("sim");
+  const[testStr,setTestStr]=useState("ab\naab\nab\nba\nbba\naabb\n");
+
+  // sim state
+  const[simStr,setSimStr]=useState("");
+  const[sim,setSim]=useState(null);
+  const[step,setStep]=useState(0);
+  const[playing,setPlaying]=useState(false);
+  const[speed,setSpeed]=useState(800);
+
+  const svgRef=useRef(null);
+  const playRef=useRef(null);
+  const fileRef=useRef(null);
+  const logRef=useRef(null);
+
+  const simOn=!!sim;
+  const frame=sim?.frames[step];
+  const actS=frame?.states??[];
+  const actT=frame?.trans??[];
+  const atEnd=sim&&step===sim.frames.length-1;
+
+  // playback
+  useEffect(()=>{
+    if(playing&&sim){
+      playRef.current=setInterval(()=>{
+        setStep(s=>{
+          if(s>=sim.frames.length-1){setPlaying(false);return s;}
+          return s+1;
+        });
+      },speed);
+    }
+    return()=>clearInterval(playRef.current);
+  },[playing,sim,speed]);
+
+  // scroll log
+  useEffect(()=>{
+    if(!logRef.current)return;
+    logRef.current.querySelector(`[data-step="${step}"]`)
+      ?.scrollIntoView({block:"nearest",behavior:"smooth"});
+  },[step]);
+
+  // run sim
+  const doRun=()=>{
+    if(!states.some(s=>s.isStart)){
+      alert("No start state!\nRight-click a state → Set as Start");
+      return;
+    }
+    const res=runSim(states,trans,mode,simStr);
+    if(!res){alert("Simulation error.");return;}
+    setSim(res);setStep(0);setPlaying(false);
+  };
+  const doStop=()=>{setSim(null);setStep(0);setPlaying(false);};
+  const doFwd=()=>{if(sim)setStep(s=>Math.min(s+1,sim.frames.length-1));};
+  const doBwd=()=>setStep(s=>Math.max(s-1,0));
+
+  // svg coords
+  const getXY=useCallback(e=>{
+    const r=svgRef.current.getBoundingClientRect();
+    return{x:e.clientX-r.left,y:e.clientY-r.top};
+  },[]);
+
+  // canvas double-click → add state
+  const onDblClick=e=>{
+    if(simOn)return;
+    if(!e.target.dataset.bg)return;
+    const{x,y}=getXY(e);
+    const ns={id:uid(),x,y,lbl:`q${states.length}`,
+      isStart:states.length===0,isAccept:false};
+    setStates(p=>[...p,ns]);
+    setSel(ns.id);setCtxMenu(null);
+  };
+
+  // state mouse down
+  const onStateDown=(e,id)=>{
+    e.stopPropagation();
+    setCtxMenu(null);
+    if(simOn){setSel(id);return;}
+    if(tool==="connect"){
+      if(!connFrom){setConnFrom(id);setSel(id);return;}
+      const raw=window.prompt("Transition symbols (comma-separated; use ε for epsilon):","a");
+      if(raw&&raw.trim()){
+        const syms=raw.split(",").map(s=>s.trim()).filter(Boolean);
+        const ex=trans.find(t=>t.from===connFrom&&t.to===id);
+        if(ex)setTrans(p=>p.map(t=>t.id===ex.id?{...t,syms:[...new Set([...t.syms,...syms])]}:t));
+        else setTrans(p=>[...p,{id:uid(),from:connFrom,to:id,syms}]);
+      }
+      setConnFrom(null);setSel(null);return;
+    }
+    const{x,y}=getXY(e);
+    const s=states.find(s=>s.id===id);
+    setDrag({id,ox:x-s.x,oy:y-s.y});
+    setSel(id);
+  };
+
+  const onMove=e=>{
+    const{x,y}=getXY(e);
+    setMouse({x,y});
+    if(drag)setStates(p=>p.map(s=>s.id===drag.id?{...s,x:x-drag.ox,y:y-drag.oy}:s));
+  };
+  const onUp=()=>setDrag(null);
+
+  const onBgClick=e=>{
+    if(e.target.dataset.bg){setSel(null);setCtxMenu(null);if(tool==="connect")setConnFrom(null);}
+  };
+
+  const onStateCtx=(e,id)=>{
+    e.preventDefault();e.stopPropagation();
+    if(simOn)return;
+    const{x,y}=getXY(e);
+    setCtxMenu({x,y,id,type:"state"});setSel(id);
+  };
+
+  const onTransCtx=(e,id)=>{
+    e.preventDefault();e.stopPropagation();
+    if(simOn)return;
+    const{x,y}=getXY(e);
+    setCtxMenu({x,y,id,type:"trans"});setSel(id);
+  };
+
+  // keyboard
+  useEffect(()=>{
+    const h=e=>{
+      if(["INPUT","TEXTAREA","SELECT"].includes(document.activeElement?.tagName))return;
+      if((e.key==="Delete"||e.key==="Backspace")&&sel&&!simOn){
+        if(states.some(s=>s.id===sel)){
+          setStates(p=>p.filter(s=>s.id!==sel));
+          setTrans(p=>p.filter(t=>t.from!==sel&&t.to!==sel));
+        }else setTrans(p=>p.filter(t=>t.id!==sel));
+        setSel(null);
+      }
+      if(e.key==="Escape"){setConnFrom(null);setCtxMenu(null);setSel(null);}
+    };
+    window.addEventListener("keydown",h);
+    return()=>window.removeEventListener("keydown",h);
+  },[sel,states,simOn]);
+
+  // ctx menu actions
+  const ctxSetStart=id=>{
+    setStates(p=>p.map(s=>({...s,isStart:s.id===id?!s.isStart:false})));
+    setCtxMenu(null);
+  };
+  const ctxAccept=id=>{
+    setStates(p=>p.map(s=>s.id===id?{...s,isAccept:!s.isAccept}:s));
+    setCtxMenu(null);
+  };
+  const ctxRename=id=>{
+    const s=states.find(s=>s.id===id);
+    const n=window.prompt("State label:",s.lbl);
+    if(n&&n.trim())setStates(p=>p.map(s=>s.id===id?{...s,lbl:n.trim()}:s));
+    setCtxMenu(null);
+  };
+  const ctxDel=(id,type)=>{
+    if(type==="state"){
+      setStates(p=>p.filter(s=>s.id!==id));
+      setTrans(p=>p.filter(t=>t.from!==id&&t.to!==id));
+    }else setTrans(p=>p.filter(t=>t.id!==id));
+    setSel(null);setCtxMenu(null);
+  };
+  const ctxEditTrans=id=>{
+    const t=trans.find(t=>t.id===id);
+    const n=window.prompt("Edit symbols (comma-separated):",t.syms.join(","));
+    if(n!==null&&n.trim()){
+      const syms=n.split(",").map(s=>s.trim()).filter(Boolean);
+      if(syms.length)setTrans(p=>p.map(t=>t.id===id?{...t,syms}:t));
+    }
+    setCtxMenu(null);
+  };
+
+  // load / clear / io
+  const loadEx=name=>{
+    if(!name)return;
+    const ex=EXAMPLES[name];
+    setStates(ex.states.map(s=>({...s})));
+    setTrans(ex.trans.map(t=>({...t})));
+    setMode(ex.mode);doStop();
+    setSel(null);setCtxMenu(null);setConnFrom(null);
+  };
+  const clearAll=()=>{
+    setStates([]);setTrans([]);doStop();
+    setSel(null);setCtxMenu(null);setConnFrom(null);
+  };
+  const exportJSON=()=>{
+    const b=new Blob([JSON.stringify({states,trans,mode},null,2)],{type:"application/json"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(b);a.download="automaton.json";a.click();
+  };
+  const importJSON=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const rd=new FileReader();
+    rd.onload=ev=>{
+      try{const d=JSON.parse(ev.target.result);
+        setStates(d.states);setTrans(d.trans);setMode(d.mode||"dfa");doStop();
+      }catch{alert("Invalid JSON file.");}
+    };
+    rd.readAsText(f);e.target.value="";
+  };
+
+  // derived
+  const alphabet=useMemo(()=>{
+    const s=new Set();trans.forEach(t=>t.syms.forEach(sym=>s.add(sym)));
+    return[...s].sort();
+  },[trans]);
+
+  const dfaWarnings=useMemo(()=>{
+    if(mode!=="dfa")return[];
+    const w=[],alpha=alphabet.filter(s=>s!=="ε");
+    states.forEach(st=>alpha.forEach(sym=>{
+      if(trans.filter(t=>t.from===st.id&&t.syms.includes(sym)).length>1)
+        w.push(`${st.lbl}: multiple '${sym}' transitions`);
+    }));
+    return w;
+  },[states,trans,mode,alphabet]);
+
+  const quickTests=useMemo(()=>{
+    if(!states.some(s=>s.isStart))return[];
+    return testStr.split("\n").map(s=>s.trimEnd())
+      .filter((_,i)=>i<30)
+      .map(s=>{
+        const res=runSim(states,trans,mode,s);
+        return{s,ok:res?.accepted??false};
+      });
+  },[testStr,states,trans,mode]);
+
+  // ─── RENDER ─────────────────────────────────────────
+  return (
+    <div style={{display:"flex",flexDirection:"column",height:"100vh",
+      background:C.bg,fontFamily:FF,color:C.text,userSelect:"none",overflow:"hidden"}}>
+
+      {/* ══ TOOLBAR ══════════════════════════════════════ */}
+      <div style={{display:"flex",alignItems:"center",gap:"5px",padding:"6px 12px",
+        background:C.surface,borderBottom:`1px solid ${C.border}`,flexShrink:0,flexWrap:"wrap"}}>
+
+        <span style={{fontSize:"14px",fontWeight:"700",color:C.accent,
+          letterSpacing:"1px",marginRight:"3px",fontFamily:FF}}>
+          FA<span style={{color:C.dim}}>SIM</span>
+        </span>
+
+        <div style={{width:"1px",height:"20px",background:C.border,flexShrink:0}}/>
+
+        {/* Mode toggle */}
+        <div style={{display:"flex",gap:"2px",background:C.bg,borderRadius:"6px",padding:"2px"}}>
+          {["dfa","nfa"].map(m=>(
+            <button key={m} onClick={()=>{if(!simOn)setMode(m);}}
+              style={{padding:"3px 12px",border:"none",borderRadius:"4px",
+                cursor:simOn?"default":"pointer",
+                background:mode===m?C.accent:"transparent",
+                color:mode===m?C.bg:C.mid,
+                fontFamily:FF,fontSize:"10px",fontWeight:"700",letterSpacing:"1.5px",
+                textTransform:"uppercase",transition:"all .15s",
+                opacity:simOn&&mode!==m?.4:1}}>{m}</button>
+          ))}
+        </div>
+
+        <div style={{width:"1px",height:"20px",background:C.border,flexShrink:0}}/>
+
+        <Btn active={tool==="select"&&!simOn} disabled={simOn}
+          onClick={()=>{if(!simOn){setTool("select");setConnFrom(null);}}}>↖ Select</Btn>
+        <Btn active={tool==="connect"&&!simOn} disabled={simOn}
+          onClick={()=>{if(!simOn){setTool("connect");setConnFrom(null);}}}>→ Connect</Btn>
+
+        <div style={{width:"1px",height:"20px",background:C.border,flexShrink:0}}/>
+
+        <select onChange={e=>{loadEx(e.target.value);e.target.value="";}}
+          style={{padding:"4px 8px",background:C.surface,border:`1px solid ${C.border}`,
+            color:C.text,borderRadius:"5px",fontFamily:FF,fontSize:"10px",
+            cursor:"pointer",outline:"none"}}>
+          <option value="">⚡ Examples</option>
+          {Object.keys(EXAMPLES).map(k=><option key={k} value={k}>{k}</option>)}
+        </select>
+
+        <Btn active={showTable} onClick={()=>setShowTable(v=>!v)}>⊞ Table</Btn>
+        <Btn onClick={exportJSON}>↓ Export</Btn>
+        <Btn onClick={()=>fileRef.current.click()}>↑ Import</Btn>
+        <input ref={fileRef} type="file" accept=".json"
+          style={{display:"none"}} onChange={importJSON}/>
+        <Btn onClick={clearAll} danger>✕ Clear</Btn>
+
+        <span style={{marginLeft:"auto",fontSize:"9px",color:C.dim,whiteSpace:"nowrap"}}>
+          Dbl-click: add state &nbsp;·&nbsp; Right-click: options &nbsp;·&nbsp; Del: remove &nbsp;·&nbsp; Esc: cancel
+        </span>
+      </div>
+
+      {/* ══ BODY ══════════════════════════════════════════ */}
+      <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+
+        {/* ─── CANVAS ──────────────────────────────────── */}
+        <div style={{flex:1,position:"relative",overflow:"hidden"}}>
+          <svg ref={svgRef} style={{width:"100%",height:"100%",
+            cursor:tool==="connect"?(connFrom?"crosshair":"cell"):"default"}}
+            onDoubleClick={onDblClick}
+            onMouseMove={onMove}
+            onMouseUp={onUp}
+            onMouseLeave={onUp}
+            onClick={onBgClick}>
+
+            <defs>
+              <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+                <circle cx="14" cy="14" r="0.7" fill="#0c2040"/>
+              </pattern>
+              {[["a",C.border+"bb"],["ac",C.accent],["sl",C.warn],
+                ["ok",C.success],["er",C.danger]].map(([id,col])=>(
+                <marker key={id} id={`m${id}`} markerWidth="10" markerHeight="10"
+                  refX="8" refY="4" orient="auto">
+                  <path d="M0 0 L8 4 L0 8Z" fill={col}/>
+                </marker>
+              ))}
+              <filter id="fb"><feGaussianBlur stdDeviation="5" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              <filter id="fg"><feGaussianBlur stdDeviation="6" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+              <filter id="fr"><feGaussianBlur stdDeviation="5" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+            </defs>
+
+            {/* background */}
+            <rect width="100%" height="100%" fill={C.canvas} data-bg="true"/>
+            <rect width="100%" height="100%" fill="url(#grid)" style={{pointerEvents:"none"}}/>
+
+            {/* connect preview arrow */}
+            {tool==="connect"&&connFrom&&(()=>{
+              const s=states.find(s=>s.id===connFrom);
+              if(!s)return null;
+              const d=Math.hypot(mouse.x-s.x,mouse.y-s.y)||1;
+              return <line x1={s.x+(mouse.x-s.x)/d*SR} y1={s.y+(mouse.y-s.y)/d*SR}
+                x2={mouse.x} y2={mouse.y}
+                stroke={C.warn} strokeWidth="1.5" strokeDasharray="6,4"
+                opacity=".7" style={{pointerEvents:"none"}}/>;
+            })()}
+
+            {/* start arrow */}
+            {states.filter(s=>s.isStart).map(s=>(
+              <g key={`sa${s.id}`} style={{pointerEvents:"none"}}>
+                <line x1={s.x-SR-44} y1={s.y} x2={s.x-SR-2} y2={s.y}
+                  stroke={C.success} strokeWidth="2" markerEnd="url(#mok)"/>
+                <text x={s.x-SR-50} y={s.y+4} textAnchor="end"
+                  fontSize="9" fill={C.success} fontFamily={FF}>start</text>
+              </g>
+            ))}
+
+            {/* transitions */}
+            {trans.map(t=>{
+              const f=states.find(s=>s.id===t.from);
+              const to=states.find(s=>s.id===t.to);
+              if(!f||!to)return null;
+              const p=calcPath(f,to,trans);
+              if(!p)return null;
+              const act=actT.includes(t.id);
+              const isSel=sel===t.id&&!simOn;
+              const ok=atEnd&&sim?.accepted&&act;
+              const err=atEnd&&!sim?.accepted&&act;
+              const col=ok?C.success:err?C.danger:act?C.accent:isSel?C.warn:C.border+"88";
+              const mid=ok?"ok":err?"er":act?"ac":isSel?"sl":"a";
+              const lw=Math.max(34,t.syms.join(",").length*7+14);
+              return (
+                <g key={t.id} style={{cursor:"pointer"}}
+                  onContextMenu={e=>onTransCtx(e,t.id)}
+                  onClick={e=>{e.stopPropagation();if(!simOn){setSel(t.id);setCtxMenu(null);}}}>
+                  <path d={p.d} fill="none" stroke="transparent" strokeWidth="14"/>
+                  <path d={p.d} fill="none" stroke={col}
+                    strokeWidth={act?2.5:1.5}
+                    markerEnd={`url(#m${mid})`}
+                    opacity={simOn&&!act?.18:1}
+                    style={act?{filter:"url(#fb)"}:{}}
+                    strokeDasharray={isSel?"5,3":"none"}/>
+                  <rect x={p.lx-lw/2} y={p.ly-9} width={lw} height={18} rx="3"
+                    fill={C.canvas} opacity=".93" style={{pointerEvents:"none"}}/>
+                  <text x={p.lx} y={p.ly+5} textAnchor="middle" fontSize="11"
+                    fontFamily={FF} fill={col} fontWeight={act?"700":"400"}
+                    style={{pointerEvents:"none"}}>{t.syms.join(",")}</text>
+                </g>
+              );
+            })}
+
+            {/* states */}
+            {states.map(s=>{
+              const act=actS.includes(s.id);
+              const isSel=sel===s.id&&!simOn;
+              const isConn=connFrom===s.id;
+              const dead=simOn&&step>0&&!act;
+              const ok=atEnd&&sim?.accepted&&s.isAccept&&act;
+              const err=atEnd&&!sim?.accepted&&act;
+              const stroke=ok?C.success:err?C.danger
+                :act&&!atEnd?C.accent:isSel||isConn?C.warn:C.border+"cc";
+              const fill=ok?"#002a12":err?"#28000e":act&&!atEnd?"#001535":C.stateBase;
+              const gf=ok?"url(#fg)":err?"url(#fr)":act&&!atEnd?"url(#fb)":"none";
+              return (
+                <g key={s.id} transform={`translate(${s.x},${s.y})`}
+                  style={{cursor:simOn?"default":tool==="connect"?"pointer":"grab"}}
+                  onMouseDown={e=>onStateDown(e,s.id)}
+                  onContextMenu={e=>onStateCtx(e,s.id)}>
+                  {s.isAccept&&<circle r={SR+7} fill="none" stroke={stroke}
+                    strokeWidth="1.5" opacity={dead?.1:.65}/>}
+                  <circle r={SR} fill={fill} stroke={stroke}
+                    strokeWidth={act||isSel||isConn?2.5:1.5}
+                    opacity={dead?.12:1}
+                    style={(act||ok||err)?{filter:gf}:{}}/>
+                  <text textAnchor="middle" y={5} fontSize="12" fontFamily={FF}
+                    fill={dead?C.dim:act?stroke:C.text}
+                    fontWeight={act?"700":"500"}
+                    style={{pointerEvents:"none"}}>{s.lbl}</text>
+                  {(isSel||isConn)&&<circle r={SR+12} fill="none" stroke={C.warn}
+                    strokeWidth="1" strokeDasharray="4,3" opacity=".6"/>}
+                </g>
+              );
+            })}
+
+            {states.length===0&&(
+              <g style={{pointerEvents:"none"}}>
+                <text x="50%" y="43%" textAnchor="middle" fontSize="16"
+                  fill={C.dim} fontFamily={FF}>Double-click anywhere to add a state</text>
+                <text x="50%" y="50%" textAnchor="middle" fontSize="12"
+                  fill={C.dim+"55"} fontFamily={FF}>or load an example from the toolbar</text>
+              </g>
+            )}
+          </svg>
+
+          {/* connect mode banner */}
+          {tool==="connect"&&!simOn&&(
+            <div style={{position:"absolute",top:"10px",left:"50%",
+              transform:"translateX(-50%)",background:`${C.warn}12`,
+              border:`1px solid ${C.warn}44`,borderRadius:"6px",
+              padding:"5px 14px",fontSize:"10px",color:C.warn,
+              pointerEvents:"none",whiteSpace:"nowrap"}}>
+              {connFrom
+                ?`${states.find(s=>s.id===connFrom)?.lbl}: click a target state (same = self-loop)`
+                :"Click a source state"}
+            </div>
+          )}
+
+          {/* result badge */}
+          {atEnd&&sim&&(
+            <div style={{position:"absolute",top:"12px",right:"12px",
+              background:sim.accepted?`${C.success}12`:`${C.danger}12`,
+              border:`2px solid ${sim.accepted?C.success:C.danger}66`,
+              borderRadius:"10px",padding:"10px 20px",textAlign:"center",
+              animation:"pop .3s ease"}}>
+              <div style={{fontSize:"22px",fontWeight:"700",letterSpacing:"1px",
+                color:sim.accepted?C.success:C.danger}}>
+                {sim.accepted?"✓ ACCEPTED":"✗ REJECTED"}
+              </div>
+              <div style={{fontSize:"10px",color:C.mid,marginTop:"3px"}}>
+                {sim.accepted?"String ∈ L(M)":"String ∉ L(M)"}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ─── RIGHT PANEL ─────────────────────────────── */}
+        <div style={{width:"275px",display:"flex",flexDirection:"column",
+          background:C.surface,borderLeft:`1px solid ${C.border}`,
+          flexShrink:0,overflow:"hidden"}}>
+
+          {/* tabs */}
+          <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+            {[["sim","Simulate"],["test","Test"],["info","Info"]].map(([k,lbl])=>(
+              <button key={k} onClick={()=>setActiveTab(k)}
+                style={{flex:1,padding:"8px 4px",background:"transparent",
+                  border:"none",borderBottom:`2px solid ${activeTab===k?C.accent:"transparent"}`,
+                  color:activeTab===k?C.accent:C.dim,
+                  fontFamily:FF,fontSize:"9px",fontWeight:"700",letterSpacing:"1.5px",
+                  cursor:"pointer",transition:"all .15s"}}>{lbl.toUpperCase()}</button>
+            ))}
+          </div>
+
+          {/* ── SIMULATE TAB ───────────────────────────── */}
+          {activeTab==="sim"&&(
+            <div style={{display:"flex",flexDirection:"column",flex:1,overflow:"hidden"}}>
+
+              {/* input */}
+              <div style={{padding:"10px 12px",borderBottom:`1px solid ${C.border}`}}>
+                <PLabel>INPUT STRING</PLabel>
+                <input value={simStr}
+                  onChange={e=>setSimStr(e.target.value)}
+                  disabled={simOn}
+                  placeholder="type string here…"
+                  onKeyDown={e=>{if(e.key==="Enter"&&!simOn)doRun();}}
+                  style={{width:"100%",padding:"8px 10px",background:C.bg,
+                    border:`1px solid ${simOn?C.border+"44":C.border}`,
+                    borderRadius:"6px",color:simOn?C.mid:C.text,
+                    fontFamily:FF,fontSize:"15px",letterSpacing:"3px",
+                    outline:"none",caretColor:C.accent}}/>
+
+                {/* tape */}
+                {simOn&&(
+                  <div style={{marginTop:"10px",display:"flex",gap:"3px",
+                    flexWrap:"wrap",alignItems:"flex-end",minHeight:"34px"}}>
+                    {simStr.length===0?(
+                      <span style={{fontSize:"11px",color:C.mid}}>ε (empty string)</span>
+                    ):simStr.split("").map((ch,i)=>{
+                      const cur=i===step-1&&step>0;
+                      const past=i<step-1;
+                      return(
+                        <div key={i} className="tape-cell"
+                          style={{background:cur?`${C.accent}22`:C.bg,
+                            borderColor:cur?C.accent:past?C.dim+"33":C.border+"55",
+                            color:cur?C.accent:past?C.mid:C.text}}>
+                          {ch}
+                          {cur&&<div style={{position:"absolute",bottom:"-9px",
+                            left:"50%",transform:"translateX(-50%)",
+                            fontSize:"7px",color:C.accent}}>▲</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* controls */}
+              <div style={{padding:"10px 12px",borderBottom:`1px solid ${C.border}`}}>
+                <PLabel>CONTROLS</PLabel>
+                {!simOn?(
+                  <button onClick={doRun}
+                    style={{width:"100%",padding:"10px",background:`${C.accent}16`,
+                      border:`1px solid ${C.accent}55`,borderRadius:"7px",
+                      color:C.accent,fontFamily:FF,fontSize:"11px",
+                      cursor:"pointer",fontWeight:"700",letterSpacing:"2px",
+                      transition:"all .15s"}}>▶ RUN SIMULATION</button>
+                ):(
+                  <>
+                    {/* step info */}
+                    <div style={{marginBottom:"8px",padding:"7px 9px",
+                      background:`${C.accent}08`,border:`1px solid ${C.border}`,
+                      borderRadius:"6px",fontSize:"10px"}}>
+                      <span style={{color:C.dim}}>Step </span>
+                      <span style={{color:C.accent,fontWeight:"700"}}>{step}</span>
+                      <span style={{color:C.dim}}> / {sim.frames.length-1}</span>
+                      <div style={{color:C.mid,fontSize:"9px",lineHeight:"1.5",marginTop:"2px"}}>
+                        {frame?.desc}
+                      </div>
+                      {actS.length>0&&(
+                        <div style={{marginTop:"4px",display:"flex",gap:"3px",flexWrap:"wrap"}}>
+                          {actS.map(id=>(
+                            <span key={id} style={{padding:"1px 6px",
+                              background:`${C.accent}22`,
+                              border:`1px solid ${C.accent}44`,
+                              borderRadius:"3px",fontSize:"10px",
+                              color:C.accent,fontWeight:"700"}}>
+                              {states.find(s=>s.id===id)?.lbl??id}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* buttons */}
+                    <div style={{display:"flex",gap:"3px",marginBottom:"8px"}}>
+                      {[
+                        {icon:"⏮",fn:()=>setStep(0),dis:step===0},
+                        {icon:"◀",fn:doBwd,dis:step===0},
+                        {icon:playing?"⏸":"▶",fn:()=>setPlaying(p=>!p),hi:true},
+                        {icon:"▶",fn:doFwd,dis:step===sim.frames.length-1,mirror:true},
+                        {icon:"⏭",fn:()=>setStep(sim.frames.length-1),dis:step===sim.frames.length-1},
+                      ].map(({icon,fn,dis,hi},i)=>(
+                        <button key={i} onClick={fn} disabled={dis}
+                          style={{flex:1,padding:"6px",fontFamily:FF,fontSize:"14px",
+                            background:hi?`${C.accent}1a`:"transparent",
+                            border:`1px solid ${hi?C.accent+"55":C.border}`,
+                            borderRadius:"5px",cursor:dis?"default":"pointer",
+                            color:dis?C.dim:hi?C.accent:C.text,
+                            opacity:dis?.3:1,transition:"all .1s"}}>{icon}</button>
+                      ))}
+                    </div>
+
+                    {/* speed */}
+                    <div style={{display:"flex",alignItems:"center",gap:"7px",
+                      marginBottom:"8px",fontSize:"9px",color:C.mid}}>
+                      <span>FAST</span>
+                      <input type="range" min="100" max="2500" value={speed}
+                        onChange={e=>setSpeed(+e.target.value)}
+                        style={{flex:1,accentColor:C.accent}}/>
+                      <span>SLOW</span>
+                    </div>
+
+                    <button onClick={doStop}
+                      style={{width:"100%",padding:"6px",background:`${C.danger}0f`,
+                        border:`1px solid ${C.danger}44`,borderRadius:"5px",
+                        color:C.danger,fontFamily:FF,fontSize:"10px",cursor:"pointer"}}>
+                      ✕ STOP
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {/* log */}
+              {simOn&&(
+                <div ref={logRef} style={{flex:1,overflowY:"auto",padding:"8px 10px"}}>
+                  <PLabel>EXECUTION LOG</PLabel>
+                  {sim.frames.map((fr,i)=>{
+                    const isCur=i===step;
+                    const isLast=i===sim.frames.length-1;
+                    return(
+                      <div key={i} data-step={i} onClick={()=>setStep(i)}
+                        style={{padding:"5px 8px",marginBottom:"2px",borderRadius:"5px",
+                          cursor:"pointer",
+                          background:isCur?`${C.accent}16`:"transparent",
+                          border:`1px solid ${isCur?C.accent+"44":"transparent"}`,
+                          fontSize:"10px",lineHeight:"1.5",
+                          color:isCur?C.text:C.dim,transition:"all .1s"}}>
+                        <span style={{color:C.dim+"66",marginRight:"6px",fontSize:"9px"}}>{i}</span>
+                        {fr.desc}
+                        {isLast&&<span style={{marginLeft:"6px",fontSize:"9px",fontWeight:"700",
+                          color:sim.accepted?C.success:C.danger}}>
+                          {sim.accepted?"✓":"✗"}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── TEST TAB ─────────────────────────────── */}
+          {activeTab==="test"&&(
+            <div style={{display:"flex",flexDirection:"column",flex:1,overflow:"hidden"}}>
+              <div style={{padding:"10px 12px",borderBottom:`1px solid ${C.border}`}}>
+                <PLabel>TEST STRINGS (one per line, max 30)</PLabel>
+                <textarea value={testStr} onChange={e=>setTestStr(e.target.value)} rows={8}
+                  placeholder={"ab\naab\nbba\n"}
+                  style={{width:"100%",padding:"7px 9px",background:C.bg,
+                    border:`1px solid ${C.border}`,borderRadius:"6px",
+                    color:C.text,fontFamily:FF,fontSize:"12px",
+                    letterSpacing:"1px",outline:"none",resize:"vertical",
+                    caretColor:C.accent}}/>
+                {!states.some(s=>s.isStart)&&(
+                  <div style={{fontSize:"10px",color:C.warn,marginTop:"5px"}}>
+                    ⚠ Set a start state first
+                  </div>
+                )}
+              </div>
+              <div style={{flex:1,overflowY:"auto",padding:"8px 10px"}}>
+                <PLabel>RESULTS</PLabel>
+                {quickTests.length===0&&(
+                  <div style={{fontSize:"10px",color:C.dim}}>No strings entered</div>
+                )}
+                {quickTests.map(({s,ok},i)=>(
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",
+                    alignItems:"center",padding:"5px 8px",marginBottom:"2px",
+                    borderRadius:"5px",
+                    background:ok?`${C.success}0a`:`${C.danger}0a`,
+                    border:`1px solid ${ok?C.success+"33":C.danger+"33"}`,
+                    fontSize:"11px"}}>
+                    <span style={{color:C.text,fontWeight:"500",letterSpacing:"1px",
+                      maxWidth:"155px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {s===""?<em style={{color:C.mid}}>ε</em>:`"${s}"`}
+                    </span>
+                    <span style={{fontWeight:"700",fontSize:"10px",
+                      color:ok?C.success:C.danger}}>
+                      {ok?"✓ ACC":"✗ REJ"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── INFO TAB ─────────────────────────────── */}
+          {activeTab==="info"&&(
+            <div style={{flex:1,overflowY:"auto",padding:"12px"}}>
+              <PLabel>AUTOMATON INFO</PLabel>
+              {[
+                ["Type",mode.toUpperCase()],
+                ["States",states.length],
+                ["Transitions",trans.length],
+                ["Alphabet",alphabet.length?alphabet.join(", "):"—"],
+                ["Start state",states.find(s=>s.isStart)?.lbl||"—"],
+                ["Accept states",states.filter(s=>s.isAccept).map(s=>s.lbl).join(", ")||"—"],
+              ].map(([k,v])=>(
+                <div key={k} style={{display:"flex",justifyContent:"space-between",
+                  padding:"5px 0",fontSize:"11px",
+                  borderBottom:`1px solid ${C.border}30`}}>
+                  <span style={{color:C.mid}}>{k}</span>
+                  <span style={{color:C.text,maxWidth:"140px",textAlign:"right",wordBreak:"break-word"}}>{v}</span>
+                </div>
+              ))}
+
+              {dfaWarnings.length>0&&(
+                <div style={{marginTop:"12px",background:`${C.warn}0d`,
+                  border:`1px solid ${C.warn}33`,borderRadius:"6px",padding:"9px"}}>
+                  <div style={{color:C.warn,fontSize:"10px",marginBottom:"5px",fontWeight:"700"}}>
+                    ⚠ DFA Issues
+                  </div>
+                  {dfaWarnings.slice(0,8).map((w,i)=>(
+                    <div key={i} style={{color:C.mid,fontSize:"10px",marginBottom:"2px"}}>• {w}</div>
+                  ))}
+                </div>
+              )}
+
+              <div style={{marginTop:"14px"}}>
+                <PLabel>QUICK GUIDE</PLabel>
+                {[
+                  ["Add state","Double-click canvas"],
+                  ["Move state","Drag (Select mode)"],
+                  ["Add transition","Connect mode → click source → click dest"],
+                  ["Self-loop","Connect mode → click same state twice"],
+                  ["Set start/accept","Right-click state"],
+                  ["Edit transition","Right-click arrow"],
+                  ["Delete anything","Select it → Del key, or right-click → Delete"],
+                  ["ε-transition","Connect mode → type ε in symbol prompt"],
+                ].map(([k,v])=>(
+                  <div key={k} style={{marginBottom:"5px",fontSize:"10px"}}>
+                    <span style={{color:C.accent,fontWeight:"700"}}>{k}: </span>
+                    <span style={{color:C.mid}}>{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ══ TRANSITION TABLE ═════════════════════════════ */}
+      {showTable&&(
+        <div style={{position:"fixed",inset:0,background:"#000000aa",
+          display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}}
+          onClick={()=>setShowTable(false)}>
+          <div style={{background:C.surface,border:`1px solid ${C.border}`,
+            borderRadius:"10px",padding:"20px",maxWidth:"90vw",maxHeight:"80vh",
+            overflow:"auto",fontFamily:FF,animation:"pop .2s ease"}}
+            onClick={e=>e.stopPropagation()}>
+            <div style={{display:"flex",justifyContent:"space-between",
+              alignItems:"center",marginBottom:"14px"}}>
+              <span style={{fontSize:"13px",fontWeight:"700",color:C.text}}>
+                Transition Table — {mode.toUpperCase()}
+              </span>
+              <button onClick={()=>setShowTable(false)}
+                style={{background:"transparent",border:"none",color:C.mid,
+                  cursor:"pointer",fontSize:"22px",fontFamily:FF}}>×</button>
+            </div>
+            {alphabet.length===0?(
+              <div style={{color:C.mid,fontSize:"12px"}}>No transitions defined yet.</div>
+            ):(
+              <>
+                <table style={{borderCollapse:"collapse",fontSize:"12px",minWidth:"260px"}}>
+                  <thead>
+                    <tr>
+                      <th style={{padding:"6px 14px",borderBottom:`1px solid ${C.border}`,
+                        color:C.accent,textAlign:"left"}}>State</th>
+                      {alphabet.map(sym=>(
+                        <th key={sym} style={{padding:"6px 14px",
+                          borderBottom:`1px solid ${C.border}`,
+                          color:C.warn,textAlign:"center"}}>{sym}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {states.map(st=>(
+                      <tr key={st.id}>
+                        <td style={{padding:"5px 14px",
+                          borderBottom:`1px solid ${C.border}22`,
+                          color:st.isStart?C.success:st.isAccept?C.warn:C.text,
+                          whiteSpace:"nowrap",
+                          fontWeight:st.isStart||st.isAccept?"700":"400"}}>
+                          {st.isStart?"→ ":"  "}{st.lbl}{st.isAccept?" *":""}
+                        </td>
+                        {alphabet.map(sym=>{
+                          const ts=trans.filter(t=>t.from===st.id&&t.syms.includes(sym));
+                          const val=ts.map(t=>states.find(s=>s.id===t.to)?.lbl??"?").join(",");
+                          return(
+                            <td key={sym} style={{padding:"5px 14px",
+                              borderBottom:`1px solid ${C.border}22`,
+                              textAlign:"center",color:val?C.text:C.dim}}>
+                              {val?(mode==="nfa"?`{${val}}`:val):"∅"}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div style={{marginTop:"10px",fontSize:"10px",color:C.mid}}>
+                  → start &nbsp;·&nbsp; * accept &nbsp;·&nbsp; ∅ no transition
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ══ CONTEXT MENU ════════════════════════════════ */}
+      {ctxMenu&&(
+        <div style={{position:"fixed",left:ctxMenu.x,top:ctxMenu.y,zIndex:300,
+          background:C.surface,border:`1px solid ${C.border}`,
+          borderRadius:"8px",minWidth:"175px",overflow:"hidden",
+          boxShadow:"0 8px 32px #00000077",fontFamily:FF,
+          animation:"pop .15s ease"}}
+          onClick={e=>e.stopPropagation()}>
+          {ctxMenu.type==="state"&&(()=>{
+            const s=states.find(s=>s.id===ctxMenu.id);
+            if(!s)return null;
+            return(
+              <>
+                <div style={{padding:"5px 12px 3px",fontSize:"9px",
+                  color:C.dim,letterSpacing:"1px"}}>STATE: {s.lbl}</div>
+                <MRow onClick={()=>ctxSetStart(ctxMenu.id)}>
+                  {s.isStart?"○  Remove Start":"→  Set as Start"}
+                </MRow>
+                <MRow onClick={()=>ctxAccept(ctxMenu.id)}>
+                  {s.isAccept?"◎  Remove Accept":"⊙  Set as Accept"}
+                </MRow>
+                <MRow onClick={()=>ctxRename(ctxMenu.id)}>✎  Rename</MRow>
+                <div style={{height:"1px",background:C.border}}/>
+                <MRow onClick={()=>ctxDel(ctxMenu.id,"state")} danger>✕  Delete State</MRow>
+              </>
+            );
+          })()}
+          {ctxMenu.type==="trans"&&(()=>{
+            const t=trans.find(t=>t.id===ctxMenu.id);
+            if(!t)return null;
+            const f=states.find(s=>s.id===t.from);
+            const to=states.find(s=>s.id===t.to);
+            return(
+              <>
+                <div style={{padding:"5px 12px 3px",fontSize:"9px",
+                  color:C.dim,letterSpacing:"1px"}}>
+                  {f?.lbl} → {to?.lbl}: {t.syms.join(",")}
+                </div>
+                <MRow onClick={()=>ctxEditTrans(ctxMenu.id)}>✎  Edit Symbols</MRow>
+                <div style={{height:"1px",background:C.border}}/>
+                <MRow onClick={()=>ctxDel(ctxMenu.id,"trans")} danger>✕  Delete Transition</MRow>
+              </>
+            );
+          })()}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
